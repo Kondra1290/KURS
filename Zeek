@@ -1,0 +1,305 @@
+---------------------------------------------------------------------------------------------------------------------------
+ICMP suspicious payload
+---------------------------------------------------------------------------------------------------------------------------
+@load base/frameworks/notice
+module IcmpSuspiciousPayload;
+export {
+  redef enum Notice::Type += {
+    ICMP_Suspicious_Payload_100001
+  };
+
+  const needle_pat: pattern = /MALWARE_TEST/ &redef;
+
+  const depth: count = 64 &redef;
+}
+
+event icmp_echo_request(c: connection, info: icmp_info, id: count, seq: count, payload: string)
+{
+:contentReference[oaicite:2]{index=2}
+  local head = sub_bytes(payload, 0, depth);
+:contentReference[oaicite:3]{index=3}
+  if ( needle_pat in head )
+    {
+    NOTICE([$note=IcmpSuspiciousPayload::ICMP_Suspicious_Payload_100001,
+            $msg=fmt("ICMP suspicious payload: pattern 'MALWARE_TEST' found within first %d bytes (echo id=%d seq=%d)",
+                     depth, id, seq),
+            $src=c$id$orig_h,
+            $dst=c$id$resp_h,
+            $uid=c$uid,
+            $conn=c]);
+    }
+}
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+TCP SYN with payload
+---------------------------------------------------------------------------------------------------------------------------
+module SynPayload100002;
+@load base/frameworks/notice
+export {
+  redef enum Notice::Type += {
+    TCP_SYN_With_Payload_100002
+  };
+
+  const needle: pattern = /SYN_PAYLOAD/ &redef;
+  const depth: count = 0 &redef;
+};
+event tcp_packet(c: connection, is_orig: bool, flags: string,seq: count, ack: count, len: count, payload: string)
+{
+  if ( !is_orig )
+    return;
+
+  if ( "S" !in flags )
+    return;
+
+  if ( len == 0 || |payload| == 0 )
+    return;
+  local data = payload;
+  if ( depth > 0 )
+    data = sub_bytes(payload, 0, depth);
+
+  if ( needle in data )
+    {
+    NOTICE([$note=SynPayload100002::TCP_SYN_With_Payload_100002,
+            $msg=fmt("TCP SYN with payload matched 'SYN_PAYLOAD' (len=%d) %s:%s -> %s:%s", len, c$id$orig_h, c$id$orig_p, c$id$resp_h, c$id$resp_p),
+            $src=c$id$orig_h,
+            $dst=c$id$resp_h,
+            $uid=c$uid,
+            $conn=c]);
+    }
+}
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+ICMP Oversized Payload
+---------------------------------------------------------------------------------------------------------------------------
+module IcmpOversized100003;
+@load base/frameworks/notice
+export {
+  redef enum Notice::Type += {
+    ICMP_Oversized_Payload_100003
+  };
+  const size_threshold: count = 1000 &redef;
+dsize:>1000
+  const cooldown: interval = 60secs &redef; 
+count 1 / 60s
+};
+
+global last_notice: table[addr] of time &write_expire=10min;
+
+event icmp_echo_request(c: connection, info: icmp_info, id: count, seq: count, payload: string)
+{
+  if ( |payload| <= size_threshold )
+    return;
+  local src = c$id$orig_h;
+  local now = network_time();
+  if ( src in last_notice && now - last_notice[src] < cooldown )
+    return;
+  last_notice[src] = now;
+  NOTICE([$note=IcmpOversized100003::ICMP_Oversized_Payload_100003,
+          $msg=fmt("ICMP oversized payload: %d bytes (> %d) echo id=%d seq=%d",
+                   |payload|, size_threshold, id, seq),
+          $src=src,
+          $dst=c$id$resp_h,
+          $uid=c$uid,
+          $conn=c]);
+}
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+SYN flood detected
+---------------------------------------------------------------------------------------------------------------------------
+@load base/frameworks/notice
+module SynFlood;
+export {
+  redef enum Notice::Type += {
+    TCP_SYN_Flood
+  };
+
+  const syn_count_threshold: count = 20 &redef;
+  const syn_window: interval = 10secs &redef;
+
+  const notice_cooldown: interval = 10secs &redef;
+}
+
+type SynObs: record {
+  t: time;
+  dst: addr;
+  p: port;
+};
+
+global syn_hist: table[addr] of vector of SynObs &write_expire=2min;
+global last_notice: table[addr] of time &write_expire=10min;
+
+event tcp_packet(c: connection, is_orig: bool, flags: string,
+                 seq: count, ack: count, len: count, payload: string)
+{
+  if ( !is_orig )
+    return;
+
+  if ( "S" !in flags )
+    return;
+
+  local src = c$id$orig_h;
+  local now = network_time();
+
+  if ( src !in syn_hist )
+    syn_hist[src] = vector();
+
+  local o: SynObs = [$t=now, $dst=c$id$resp_h, $p=c$id$resp_p];
+  syn_hist[src][|syn_hist[src]|] = o;
+
+  local v = syn_hist[src];
+  local pruned: vector of SynObs = vector();
+
+  for ( i in v )
+    if ( now - v[i]$t <= syn_window )
+      pruned[|pruned|] = v[i];
+
+  syn_hist[src] = pruned;
+
+  if ( |pruned| >= syn_count_threshold )
+    {
+    if ( src in last_notice && now - last_notice[src] < notice_cooldown )
+      return;
+
+    last_notice[src] = now;
+
+    NOTICE([$note=SynFlood::TCP_SYN_Flood,
+            $msg=fmt("SYN flood detected: %d SYN packets within %s from %s",
+                     |pruned|, syn_window, src),
+            $src=src,
+            $conn=c]);
+    }
+}
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+Slow TCP port scan
+---------------------------------------------------------------------------------------------------------------------------
+@load base/frameworks/notice
+module SlowSynScan;
+export {
+  redef enum Notice::Type += {
+    TCP_Slow_SYN_Scan
+  };
+
+  const syn_count_threshold: count = 10 &redef;
+  const syn_window: interval = 60secs &redef;
+
+  const notice_cooldown: interval = 60secs &redef;
+}
+
+type SynObs: record {
+  t: time;
+  dst: addr;
+  p: port;
+};
+
+global syn_hist: table[addr] of vector of SynObs &write_expire=5min;
+global last_notice: table[addr] of time &write_expire=30min;
+
+event tcp_packet(c: connection, is_orig: bool, flags: string,
+                 seq: count, ack: count, len: count, payload: string)
+{
+  if ( !is_orig )
+    return;
+
+  if ( "S" !in flags )
+    return;
+
+  local src = c$id$orig_h;
+  local now = network_time();
+
+  if ( src !in syn_hist )
+    syn_hist[src] = vector();
+
+  local o: SynObs = [$t=now, $dst=c$id$resp_h, $p=c$id$resp_p];
+  syn_hist[src][|syn_hist[src]|] = o;
+
+  local v = syn_hist[src];
+  local pruned: vector of SynObs = vector();
+
+  for ( i in v )
+    if ( now - v[i]$t <= syn_window )
+      pruned[|pruned|] = v[i];
+
+  syn_hist[src] = pruned;
+
+  if ( |pruned| >= syn_count_threshold )
+    {
+    if ( src in last_notice && now - last_notice[src] < notice_cooldown )
+      return;
+
+    last_notice[src] = now;
+
+    NOTICE([$note=SlowSynScan::TCP_Slow_SYN_Scan,
+            $msg=fmt("Slow TCP SYN scan-like activity: %d SYN packets within %s from %s",
+                     |pruned|, syn_window, src),
+            $src=src,
+            $conn=c]);
+    }
+}
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+TCP_Connection_Burst
+---------------------------------------------------------------------------------------------------------------------------
+module Burst200003;
+@load base/bif/plugins/Zeek_TCP.events.bif.zeek
+@load base/frameworks/notice
+
+export {
+  redef enum Notice::Type += { TCP_Connection_Burst_200003 };
+
+  const syn_threshold: count = 5 &redef;
+  const syn_window: interval = 5secs &redef;
+
+  const notice_cooldown: interval = 5secs &redef;
+}
+
+global syn_hist: table[addr] of vector of time &write_expire=2min;
+global last_notice: table[addr] of time &write_expire=10min;
+
+event tcp_packet(c: connection, is_orig: bool, flags: string,
+                 seq: count, ack: count, len: count, payload: string)
+{
+  if ( !is_orig )
+    return;
+
+  if ( "S" !in flags )
+    return;
+
+  local src = c$id$orig_h;
+  local now = network_time();
+
+  if ( src !in syn_hist )
+    syn_hist[src] = vector();
+
+  syn_hist[src][|syn_hist[src]|] = now;
+
+  local v = syn_hist[src];
+  local pruned: vector of time = vector();
+
+  for ( i in v )
+    if ( now - v[i] <= syn_window )
+      pruned[|pruned|] = v[i];
+
+  syn_hist[src] = pruned;
+
+  if ( |pruned| >= syn_threshold )
+    {
+    if ( src in last_notice && now - last_notice[src] < notice_cooldown )
+      return;
+
+    last_notice[src] = now;
+
+    NOTICE([$note=Burst200003::TCP_Connection_Burst_200003,
+            $msg=fmt("TCP connection burst (suspicious): %d SYN packets within %s from %s",
+                     |pruned|, syn_window, src),
+            $src=src,
+            $dst=c$id$resp_h,
+            $uid=c$uid,
+            $conn=c]);
+    }
+}
