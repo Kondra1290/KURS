@@ -1,9 +1,0 @@
-alert tcp any any -> any any (
-	msg:"TCP SYN with payload (suspicious)";
-	flags:S;
-	flow:stateless;
-	content:"SYN_PAYLOAD";
-	classtype  :attempted-recon;
-	sid:100002;
-	rev:2;
-)
