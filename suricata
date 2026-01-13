@@ -1,0 +1,59 @@
+alert icmp any any -> any any (
+	msg:"ICMP suspicious payload";
+	itype:8;
+	content:"MALWARE_TEST";
+	depth:64;
+	classtype:bad-unknown;
+	sid:100001;
+	rev:2;
+)
+
+alert tcp any any -> any any (
+	msg:"TCP SYN with payload (suspicious)";
+	flags:S;
+	flow:stateless;
+	content:"SYN_PAYLOAD";
+	classtype  :attempted-recon;
+	sid:100002;
+	rev:2;
+)
+
+alert icmp any any -> any any (
+	msg:"ICMP oversized payload";
+	itype:8;
+	dsize:>1000;
+	threshold:type threshold, track by_src, count 1, seconds 60;
+	classtype:attempted-dos;
+	sid:100003;
+	rev:2;
+)
+
+alert tcp any any ->any any (
+	msg:"SYN flood detected";
+	flags:S;
+	flow:stateless;
+	detection_filter:track by_src, count 20, seconds 10;
+	classtype:attempted-dos;
+	sid:200001;
+	rev:2;
+) 
+
+alert tcp any any -> any any (
+	msg:"Slow TCP port scan";
+	flags:S;
+	flow:stateless;
+	detection_filter:track by_src, count 10, seconds 60;
+	classtype:attempted-recon;
+	sid:200002;
+	rev:2;
+) 
+
+alert tcp any any -> any any (
+	msg:"TCP connection burst (suspicious)"; 
+	flags:S;
+	flow:stateless;
+	detection_filter:track by_src, count 5, seconds 5;
+	classtype:bad-unknown;
+	sid:200003;
+	rev:1;
+)
